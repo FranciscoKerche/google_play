@@ -54,7 +54,8 @@ get_app_info <- function(url){
                          description = app_description,
                          updated = last_update,
                          tags = list(tags),
-                         evaluation = app_score) %>%
+                         evaluation = app_score,
+                         links = url) %>%
     bind_cols(app_producer)
   
   return(app_overview)
@@ -180,3 +181,4 @@ get_app_evaluations <- function(url){
 }
 
 get_app_evaluations(relations$links[4])
+

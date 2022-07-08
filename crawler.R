@@ -1,5 +1,5 @@
 # Google play crawler --------------------------------------------------------
-pacman::p_load(tidygraph)
+pacman::p_load(tidyverse, httr, lubridate, xml2, rvest, webdriver, tidygraph)
 
 
 get_app_info <- function(url){
@@ -94,8 +94,8 @@ get_app_relations <- function(url){
 
 
 connect_apps <- function(url, graph = F){
-  original_info <- get_app_info(u)
-  relate <- get_app_relations(u)
+  original_info <- get_app_info(url)
+  relate <- get_app_relations(url)
   relation_info <- map_df(relate$links, get_app_info)
   final_nodes <- relate %>%
     left_join(relation_info) %>%
@@ -103,8 +103,8 @@ connect_apps <- function(url, graph = F){
     select(name:links)
   
   final_edges <- relate %>%
-    select(to = name) %>%
-    mutate(from = original_info$name)
+    select(to = links) %>%
+    mutate(from = original_info$links)
   if(graph == F){
   return(list("app_nodes" = final_nodes,
               "app_edges" = final_edges))
@@ -114,7 +114,72 @@ connect_apps <- function(url, graph = F){
   return(final_graph)
   }
 }
-followers <- crawl_for_apps("https://play.google.com/store/apps/details?id=com.roblox.client&gl=US")
-follow_graph <- crawl_for_apps("https://play.google.com/store/apps/details?id=com.roblox.client&gl=US", T)
+followers <- connect_apps("https://play.google.com/store/apps/details?id=com.roblox.client&gl=US")
+follow_graph <- connect_apps("https://play.google.com/store/apps/details?id=com.roblox.client&gl=US", T)
+
+
+
+
+crawl_apps <- function(url, depth = 1, graph = F){
+    followers <- connect_apps(url)
+    to_scrape <- followers$app_edges$to %>%
+      unique()
+    scraped <- followers$app_edges$from %>%
+      unique()
+    clean_scrape <- to_scrape[!to_scrape %in% scraped]
+    
+    new_depth <- map(clean_scrape, connect_apps)
+    
+    if(depth == 1){
+    
+    all_apps <- c(to_scrape, scraped)
+    
+    depth_1_edge <- new_depth %>%
+      map(~.$app_edges) %>%
+      map_df(filter, to %in% all_apps) %>%
+      bind_rows(followers$app_edges) %>%
+      unique()
+    depth_1_node <- new_depth %>%
+      map(~.$app_nodes) %>%
+      map_df(filter, links %in% all_apps) %>%
+      bind_rows(followers$app_nodes) %>%
+      unique()
+    
+    depth_1_final <- list(app_nodes = depth_1_node,
+                          app_edges = depth_1_edge)
+    return(depth_1_final)
+    }
+    
+    
+    
+    targets <- new_depth %>%
+      map(~.$app_edges$to) %>%
+      unlist() %>%
+      unique()
+    
+    origin_apps <- new_depth %>%
+      map(~.$app_edges$from) %>%
+      unlist() %>%
+      unique() %>%
+      c(., scraped)
+    
+    new_clean_scrape <- targets[!targets %in% origin_apps]
+    
+    new_followers <- map(new_clean_scrape, connect_apps)
+
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
