@@ -1,0 +1,649 @@
+---
+title: "Google Play scrapper"
+author: "Francisco W. Kerche"
+date: '2022-07-08'
+output: html_document
+---
+
+# Introdução
+
+Esse trabalho teve como intuito a construção de um scraper de algum site na internet. Como sou estudante de sociologia digital, pensei em fazer algo com as lojas de aplicativo, considerando a imensa quantidade de novos apps feitos diáriamente, me pareceu interessante fazer essa tentativa de extração na [loja de aplicativos do Google](https://play.google.com/store/games).
+
+Dois projetos já consolidados foram minhas principais referências para fazer isso. Em primeiro lugar, o [YouTube Data Tools](https://tools.digitalmethods.net/netvizz/youtube/index.php), criado por Bernhard Rieder, que é um wrapper para lidar com a API do YouTube. Em segundo lugar, o trabalho de verão de Ana Marta Flores apresentado na #SMART Data Sprint, intitulado [What do gender representation and sexuality look like in Google Play Store?](https://smart.inovamedialab.org/editions/2022-discussing-methods-making/project-reports-2022/mapping-apps/). O primeiro me interessava pela possibilidade de cosntruir um scrapper que pudesse entrar em níveis (ou graus, como ele chama) de densidade no YouTube, observando não apenas quais canais seguem quais canais, ou mesmo quais vídeos seguem determinado vídeo, mas avançar nessa lógica em múltiplas camadas. Queria aproveitar das recomendações internas da plataforma do Google Play para isso, permitindo que observássemos a forma como a plataforma ordena seu conteúdo. Já o segundo grupo, utilizava desse método para ver quais os dados disponibilizados por cada aplicativo, o que também tentei raspar aqui.
+
+Meu objetivo inicial era fazer a raspagem do site do ReclameAqui. Tinha interesse de fazer uma pesquisa sobre o reclame aqui de aplicativos de entrega, porém, o site estava bem difícil de conseguir acesso, e não me senti ainda apto pra avançar nele. Fui para o aplicativo do Google Play pensando originalmente em pegar os comentários dos aplicativos por lá, e achei interessante como proposta seguir por esse caminho.
+
+# Ao Scraper
+
+## Informações gerais
+
+Passei a olhar o site individualmente e tentar fazer um primeiro acesso com httr::GET(). Selecionei um aplicativo de jogos que minha irmã mais nova gosta e passei a ver se funcionava a entrada.
+
+```{r}
+
+pacman::p_load(tidyverse, httr, lubridate, xml2, rvest, webdriver, tidygraph, ggraph)
+
+# a few exemples to use
+u <- "https://play.google.com/store/apps/details?id=com.roblox.client&gl=US"
+
+app_h <- httr::GET(u)
+
+# Get description
+app_info <- app_h %>%
+  read_html()
+```
+
+O resultado já deu 200, então foi bastante fácil em termos de autenticação. A primeira etapa do trabalho então constituía em etapas de extração por XPATH simples, sem encontrar muitas dificuldades iniciais.
+
+```{r}
+
+app_title <- app_info %>%
+  xml2::xml_find_first("//h1[@class = 'Fd93Bb ynrBgc xwcR9d']") %>%
+  xml2::xml_text()
+
+app_score <- app_info %>%
+  xml2::xml_find_first("//div[@class = 'TT9eCd']") %>%
+  xml2::xml_text() %>%
+  str_remove("star") %>%
+  as.numeric()
+
+app_description <- app_info %>%
+  xml2::xml_find_first("//div[@class = 'bARER']") %>%
+  xml2::xml_text()
+
+last_update <- app_info %>%
+  xml2::xml_find_first("//div[@class = 'xg1aie']") %>%
+  xml2::xml_text()
+
+tags <- app_info %>%
+  xml2::xml_find_all("//span[@jsname = 'V67aGc']") %>%
+  xml_text()
+
+```
+
+Para encontrar todas essas informações bastava inspecionar a página, e usar o xpath referente para encontrar os valores.
+
+
+```{r}
+
+prod_link <- app_info %>%
+  xml2::xml_find_first("//div[@class = 'Vbfug auoIOc']/a[contains(@href, 'store')]") %>%
+  html_attr('href')
+
+prod_name <- app_info %>%
+  xml2::xml_find_first("//div[@class = 'Vbfug auoIOc']") %>%
+  xml_text()
+
+app_producer <- tibble(link = prod_link,
+                       producer = prod_name) %>%
+  mutate(link = str_c('https://play.google.com', link))
+
+
+
+```
+
+Em seguida, passei a buscar pela produtora, tanto o link para o site dela dentro do aplicativo, quanto para a produtora. Em análises futuras, penso em fazer um scraper que possa pegar todos os jogos de determinado desenvolvedor para análise.
+
+Como podemos ver, o link foi um pouco mais difícil, ele poderia variar em grande medida o href, então utilizei store, que sei que seria uma constante para selecionar o href, e utilizei do html_attr para buscar apenas o hiperlink. Ao estruturar em formato de tabela, adicionei o play.google.com, pois o link era apenas "interno" ao site, e seria interessante que eu pudesse acessar diretamente da tabela, caso quisesse utilizar o link para base de outras raspagens.
+
+```{r}
+
+
+app_overview <- tibble(name = app_title,
+                   description = app_description,
+                   updated = last_update,
+                   tags = list(tags),
+                   evaluation = app_score) %>%
+  bind_cols(app_producer)
+
+
+```
+
+Feitas essas duas etapas, criei um data-set final com todos os resultados em apenas uma linha. O intuito de fazer esse data-set "longo" e não rápido é porque permite concatenar múltiplos aplicativos em uma tabela mais simples caso haja interesse. Para fazer um teste de sua funcionalidade, transformei todas essas etapas em funções e rodei com um conjunto de jogos.
+
+
+```{r}
+
+
+get_app_info <- function(url){
+  
+  app_h <- httr::GET(url)
+  
+  # Get description
+  app_info <- app_h %>%
+    read_html()
+  
+  
+  app_title <- app_info %>%
+    xml2::xml_find_first("//h1[starts-with(@class, 'Fd93Bb')]") %>%
+    xml2::xml_text()
+  
+  app_score <- app_info %>%
+    xml2::xml_find_first("//div[@class = 'TT9eCd']") %>%
+    xml2::xml_text() %>%
+    str_remove("star") %>%
+    as.numeric()
+  
+  app_description <- app_info %>%
+    xml2::xml_find_first("//div[@class = 'bARER']") %>%
+    xml2::xml_text()
+  
+  last_update <- app_info %>%
+    xml2::xml_find_first("//div[@class = 'xg1aie']") %>%
+    xml2::xml_text()
+  
+  tags <- app_info %>%
+    xml2::xml_find_all("//span[@jsname = 'V67aGc']") %>%
+    xml_text()
+  
+  prod_link <- app_info %>%
+    xml2::xml_find_first("//div[@class = 'Vbfug auoIOc']/a[contains(@href, 'store')]") %>%
+    html_attr('href')
+  
+  prod_name <- app_info %>%
+    xml2::xml_find_first("//div[@class = 'Vbfug auoIOc']") %>%
+    xml_text()
+  
+  app_producer <- tibble(link = prod_link,
+                         producer = prod_name) %>%
+    mutate(link = str_c('https://play.google.com', link))
+  
+  
+  
+  app_overview <- tibble(name = app_title,
+                         description = app_description,
+                         updated = last_update,
+                         tags = list(tags),
+                         evaluation = app_score,
+                         links = url) %>%
+    bind_cols(app_producer)
+  
+  return(app_overview)
+}
+
+
+
+```
+
+
+```{r}
+
+games <- c("https://play.google.com/store/apps/details?id=com.nianticlabs.pokemongo",
+  "https://play.google.com/store/apps/details?id=com.ea.game.pvzfree_row",
+  "https://play.google.com/store/apps/details?id=com.kitkagames.fallbuddies",
+  "https://play.google.com/store/apps/details?id=com.kiloo.subwaysurf",
+  "https://play.google.com/store/apps/details?id=fill.up.the.frigde.organization.games",
+  "https://play.google.com/store/apps/details?id=com.dts.freefireth",
+  "https://play.google.com/store/apps/details?id=com.wn.hairtattoo",
+  "https://play.google.com/store/apps/details?id=com.noorgames.basketbattle",
+  "https://play.google.com/store/apps/details?id=com.skyland.pet.realm.block.rain.craft",
+  "https://play.google.com/store/apps/details?id=com.roblox.client",
+  "https://play.google.com/store/apps/details?id=diy.makeup.master.artist.stylist")
+
+informations <- map_df(games, get_app_info)
+informations
+
+
+```
+
+A extração funcionou tranquilamente, localizando todos os 11 jogos e suas informações especiais.
+
+## Apps relacionados
+
+A próxima etapa era pegar os aplicativos relacionados. No canto direito da página de cada um dos aplicativos encontramos um conjunto de aplicativos que são indicados pelo Google como "similares" do que o outro. Como podemos ver na seguinte imagem.
+
+
+
+Aqui, encontramos duas principais informações, em related_apps, extraímos todas as informações visíveis, sendo elas o nome do aplicativo, o produtor e a avaliação. Porém, o link se encontra em outro path.
+
+```{r}
+
+related_apps <- app_info %>%
+  xml2::xml_find_all("//div[@class = 'ubGTjb']") %>%
+  xml_text() %>%
+  .[1:18]
+
+related_apps_link <- app_info %>%
+  xml2::xml_find_all("//a[@class = 'Si6A0c nT2RTe']") %>%
+  html_attr('href') %>%
+  .[1:6]
+
+```
+
+A escolha de limitar ao final apenas para 18 e 6 resultados parte da percepção que (1) a primeira extração da sempre resultados em trios, o nome, seguido do produtor e então a avaliação dando um total de 18 apps. (2) Também se torna relevante ver que alguns aplicativos tinham mais outros apps que seriam indicados aqui, mas eles não aparecem na interface, e por vezes não são conectados com um link e pode ter alguma informação faltando, em especial a avaliação. Como complexificaria muito o código tentar localizar essa falha, preferi manter apenas o que seria visível no site.
+
+
+```{r}
+
+get_trios <- function(.x){
+  related_apps[seq(.x, length(related_apps), 3)]
+}
+relations <- tibble(app_name = get_trios(1),
+       app_producer = get_trios(2),
+       app_evaluation = get_trios(3),
+       links = related_apps_link) %>%
+  mutate(app_evaluation = str_extract(app_evaluation, "[0-9.]+") %>%
+           as.numeric(),
+         links = str_c("https://play.google.com", links))
+
+
+
+
+```
+
+Para separar esses três que são encontrados juntos no primeiro grupo fiz essa função bem simples usando baseR, separando de três em três baseado no primeiro número que é apresentado na função. Em seguida, tal qual foi feito na tabela anterior, adiciono ao link a origem no play.google, para que seja possível chegar no valor por qualquer meio.
+
+
+Esse também se tornou uma função, e pode ser utilizado para diversos grupos de uma só vez.
+
+```{r}
+
+
+get_app_relations <- function(url){
+  
+  app_h <- httr::GET(url)
+  
+  # Get description
+  app_info <- app_h %>%
+    read_html()
+  
+  related_apps <- app_info %>%
+    xml2::xml_find_all("//div[@class = 'ubGTjb']") %>%
+    xml_text() %>%
+    .[1:18]
+  
+  related_apps_link <- app_info %>%
+    xml2::xml_find_all("//a[@class = 'Si6A0c nT2RTe']") %>%
+    html_attr('href') %>%
+    .[1:6]
+  
+  get_trios <- function(.x){
+    related_apps[seq(.x, length(related_apps), 3)]
+  }
+  relations <- tibble(name = get_trios(1),
+                      producer = get_trios(2),
+                      evaluation = get_trios(3),
+                      links = related_apps_link) %>%
+    mutate(evaluation = str_extract(evaluation, "[0-9.]+") %>%
+             as.numeric(),
+           links = str_c("https://play.google.com", links))
+  
+  return(relations)
+}
+
+
+redes <- map_df(games, get_app_relations) %>%
+  filter(!is.na(name))
+redes
+
+```
+
+O problema que encontramos aqui é um NA em name para um jogo que não tem recomendações. Porém, isso não impede o script de rodar e pode ser rapidamente eliminado.
+
+## Segurança digital
+
+A próxima etapa é feita para pegar os valores dos dados disponibilizados pelos usuários para cada um dos perfis. Para encontrar esses dados é necessário clicar na seta ao lado de "Segurança de Dados" para encontrar uma página nova.
+
+Procurei na página o que poderia me levar até esse outro site diretamente, e o que encontrei foi como o próprio link se altera. Vemos, por exemplo, como o link do aplicativo passa disso:
+
+https://play.google.com/store/apps/details?id=com.dts.freefireth
+
+Para isso
+
+https://play.google.com/store/apps/datasafety?id=com.dts.freefireth
+
+A principal diferença é que entre apps/ e ?, passamos de details para datasafety. O que foi feito aqui foi a mesma ideia, selecionar esse pedaço e alterar.
+
+```{r}
+
+link_id <- str_extract(u, "id=.*")
+
+u_safe <- glue::glue("https://play.google.com/store/apps/datasafety?{link_id}")
+
+l_safe <- GET(u_safe)
+
+safe_r <- l_safe %>%
+  read_html()
+
+privacy_item <- safe_r %>%
+  xml2::xml_find_all("//h3[@class = 'aFEzEb']") %>%
+  html_text()
+
+privacy_accept <- safe_r %>%
+  xml2::xml_find_all("//div[@class = 'fozKzd']") %>%
+  html_text()
+
+app_privacy <- tibble(topic = privacy_item,
+       requirements = privacy_accept) %>%
+  separate_rows(requirements, sep = "( and |, and |, )")
+
+
+```
+
+
+Partindo dessa separação apenas repeti o processo de encontrar o xpath, e conseguia pegar tanto os ítens quanto os requerimentos. Os itens ficam em negrito e os requerimentos são aquilo que o app exige dentro daquele item, e por isso se cria a relação. Para separar em uma tabela apenas, foi feito um separate_rows, utilizando tanto vírgula, quanto "and", quanto "and, ", porque são as três formas possíveis que eles podem aparecer dependendo da quantidade de requerimentos.
+
+
+Nesse caso também foi possível transformar em uma função e fazê-lo em múltiplos aplicativos.
+
+```{r}
+
+
+get_app_privacy <- function(url){
+  link_id <- str_extract(url, "id=.*")
+  
+  u_safe <- glue::glue("https://play.google.com/store/apps/datasafety?{link_id}")
+  
+  l_safe <- GET(u_safe)
+  
+  safe_r <- l_safe %>%
+    read_html()
+  
+  privacy_item <- safe_r %>%
+    xml2::xml_find_all("//h3[@class = 'aFEzEb']") %>%
+    html_text()
+  
+  privacy_accept <- safe_r %>%
+    xml2::xml_find_all("//div[@class = 'fozKzd']") %>%
+    html_text()
+  
+  app_privacy <- tibble(topic = privacy_item,
+                        requirements = privacy_accept) %>%
+    separate_rows(requirements, sep = "( and |, and |, )")
+  return(app_privacy)
+}
+
+privacy <- map_df(games, get_app_privacy, .id = "origem") %>%
+  left_join(tibble(app_name = games, origem = as.character(seq_along(games))))
+  
+privacy
+
+```
+
+## Avaliações
+
+A última etapa do trabalho consistia em pegar as avaliações dos usuários. Como podemos ver as únicas avaliações disponíveis eram as três principais para cada aplicativo. Para mudar isso, era necessário clicar na seta ao lado de "Classificações e Resenhas". Porém, diferente da extração anterior, isso não abria uma página nova, mas uma série de partes ocultas do HTML.
+
+Inspecionando o objeto das avaliações eu vi que elas tem o mesmo xpath das três avaliações finais. Porém, quando tentava extraír apenas pelo XPATH aparecia apenas as primeiras 3 avaliações. Tentei de diversas formas atingir essa parte oculta do HTML até perceber que realmente ela apenas seria encontrada se fosse clicado o botão. Para isso utilizeo do webdriver para entrar no site e clicar o botão.
+
+```{r}
+
+
+# webdriver::install_phantomjs()
+pjs <- run_phantomjs()
+
+# Fazendo isso, o phantomJS já está rodando
+
+# A nossa porta de acesso já está rodando
+ses <- Session$new(port = pjs$port) # o pacote session tem o método new, e a gente coloca a porta certa
+# como se a gente tivesse clicado no botão para abrir o navegador
+
+ses$go(u)
+Sys.sleep(2)
+
+botao <- ses$findElement(xpath = '//*[@id="yDmH0d"]/c-wiz[2]/div/div/div[1]/div[2]/div/div[1]/c-wiz[4]/section/header/div/div[2]/button')
+botao$click()
+
+
+html <- ses$getSource()
+
+ses$delete()
+
+
+
+```
+
+O webdriver apenas entra no botão e joga a source para uma variável chamada html. Em seguida já fecha o phantom. Dessa forma, quando fosse fazer o XPATH novamente o resultado seria todos os comentários e não apenas os três primeiros.
+
+
+```{r}
+
+comment_text <- xml2::read_html(html) %>%
+  xml2::xml_find_all("//div[@class='h3YV2d']") %>%
+  xml2::xml_text()
+comment_useful <- xml2::read_html(html) %>%
+  xml2::xml_find_all("//div[@class='AJTPZc']") %>%
+  xml2::xml_text()
+stars <- xml2::read_html(html) %>%
+  xml2::xml_find_all("//div[@role='img']") %>%
+  html_attr("aria-label")
+
+overall_star <- stars[2:6] %>%
+  str_extract("[0-9.]+") %>%
+  str_remove_all("\\.") %>%
+  as.numeric()
+
+general_eval <- tibble(stars = 5:1,
+       evaluations = overall_star)
+eval_fin <- general_eval %>%
+  mutate(total_stars = stars*evaluations) %>%
+  summarise(avarage = sum(total_stars)/sum(evaluations))
+
+all_comments <- tibble(comment = comment_text,
+                       stars = stars[7:length(stars)]) %>%
+  mutate(stars = str_extract(stars, "[0-9]"))
+
+
+
+
+```
+
+
+O resultado aqui é multiplo, ele apresenta qual a avaliação, o número de estrelas e também o total de avaliações para cada nota.
+
+Tal qual todos os outros é possível fazer uma função para que isso seja feito programáticamente.
+
+```{r}
+
+
+get_app_evaluations <- function(url){
+  
+  # webdriver::install_phantomjs()
+  pjs <- run_phantomjs()
+  
+  # Fazendo isso, o phantomJS já está rodando
+  
+  # A nossa porta de acesso já está rodando
+  ses <- Session$new(port = pjs$port) # o pacote session tem o método new, e a gente coloca a porta certa
+  # como se a gente tivesse clicado no botão para abrir o navegador
+  
+  ses$go(u)
+  Sys.sleep(2)
+  
+  botao <- ses$findElement(xpath = '//*[@id="yDmH0d"]/c-wiz[2]/div/div/div[1]/div[2]/div/div[1]/c-wiz[4]/section/header/div/div[2]/button')
+  botao$click()
+  
+  
+  html <- ses$getSource()
+  
+  ses$delete()
+  
+  
+  # readr::write_file(html, "output/all_comments.html")
+  
+  comment_text <- xml2::read_html(html) %>%
+    xml2::xml_find_all("//div[@class='h3YV2d']") %>%
+    xml2::xml_text()
+  comment_useful <- xml2::read_html(html) %>%
+    xml2::xml_find_all("//div[@class='AJTPZc']") %>%
+    xml2::xml_text()
+  stars <- xml2::read_html(html) %>%
+    xml2::xml_find_all("//div[@role='img']") %>%
+    html_attr("aria-label")
+  
+  overall_star <- stars[2:6] %>%
+    str_extract("[0-9.]+") %>%
+    str_remove_all("\\.") %>%
+    as.numeric()
+  
+  general_eval <- tibble(stars = 5:1,
+                         evaluations = overall_star)
+
+  all_comments <- tibble(comment = comment_text,
+                       stars = stars[7:length(stars)]) %>%
+    mutate(stars = str_extract(stars, "[0-9]"))
+  
+  final <- list("avarage_star" = general_eval,
+                "comments" = all_comments) 
+  return(final)
+}
+
+evaluations <- map(games, get_app_evaluations) 
+all_stars <- evaluations %>%
+  map_df(~.$avarage_star, .id = "position") %>%
+  left_join(tibble(position = as.character(seq_along(games)), game = games))
+
+all_comments <- evaluations %>%
+  map_df(~.$comments, .id = "position") %>%
+  left_join(tibble(position = as.character(seq_along(games)), game = games))
+
+final_eval <- list(avarage_star = all_stars,
+     comments = all_comments)
+
+```
+
+## Graus de profundidade
+
+Depois de ter feito as funções básicas e pegar as principais informações disponibilizadas por cada um dos aplicativos, é o momento de construir um scraper que consiga avançar em camadas de aplicativos. Utilizando as redes feitas pelas recomendações dos aplicativos, vamos fazer uma expansão em "grau", usando o método bola de neve. A principal ideia desse é tentar fazer de uma maneira que seja eficiente, entrando na internet o menor número de vezes para conseguir o mesmo resultado. Para isso, é necessário criar algumas novas funções.
+
+
+Em primeiro lugar, vou transformar a função de download das relações de cada um dos canais, usando o get_app_info, que foi selecionado no primeiro grupo, é possível 
+
+```{r}
+
+connect_apps <- function(url){
+  original_info <- get_app_info(url)
+  relate <- get_app_relations(url)
+  relation_info <- map_df(relate$links, get_app_info)
+  final_nodes <- relation_info %>%
+    bind_rows(original_info)
+  
+  final_edges <- relate %>%
+    select(to = links) %>%
+    mutate(from = original_info$links)
+  return(list("app_nodes" = final_nodes,
+              "app_edges" = final_edges))
+}
+
+
+connect_apps(games[1])
+
+```
+
+Em seguida, vamos criar um sistema para fazer isso em múltiplas camadas
+
+```{r}
+
+
+crawl_app <- function(url, depth = 1, graph = F){
+  
+  try_connect_apps <- possibly(connect_apps, otherwise = NULL)
+  
+    followers <- try_connect_app(url)
+    if(is.null(followers)){
+      usethis::ui_stop("This app can't bee the seed")}
+    to_scrape <- followers$app_edges$to %>%
+      unique()
+    scraped <- followers$app_edges$from %>%
+      unique()
+    clean_scrape <- to_scrape[!to_scrape %in% scraped]
+    
+    usethis::ui_info("Start scrapping at depth 1")
+    
+    progressr::with_progress({
+    p <- progressr::progressor(length(clean_scrape)) # O parâmetro é a quantidade de passos
+      
+    new_depth <- map(clean_scrape, 
+                     ~{p()
+                       try_connect_apps(.)}) %>%
+      keep(~!is.null(.))
+    })
+    
+    split_edge_node <- function(.x, limit){
+      final_edge <- .x %>%
+        map(~.$app_edges) %>%
+        map_df(filter, to %in% limit) %>%
+        bind_rows(followers$app_edges) %>%
+        unique()
+      final_node <- .x %>%
+        map(~.$app_nodes) %>%
+        map_df(filter, links %in% limit) %>%
+        bind_rows(followers$app_nodes) %>%
+        unique()
+      final <- list(app_nodes = final_node,
+                    app_edges = final_edge)
+      return(final)
+    }
+    
+    if(depth == 1){
+    
+    all_apps <- c(to_scrape, scraped)
+    
+    final <- split_edge_node(new_depth, all_apps)
+    
+    
+    } else if(depth == 2){
+    
+    
+    targets <- new_depth %>%
+      map(~.$app_edges$to) %>%
+      unlist() %>%
+      unique()
+    
+    origin_apps <- new_depth %>%
+      map(~.$app_edges$from) %>%
+      unlist() %>%
+      unique() %>%
+      c(., scraped)
+    
+    new_clean_scrape <- targets[!targets %in% origin_apps]
+
+    usethis::ui_info("Start scrapping at depth 2")
+    progressr::with_progress({
+    p <- progressr::progressor(length(new_clean_scrape)) # O parâmetro é a quantidade de passos
+      
+    new_followers <- map(new_clean_scrape, ~{
+      p()
+      try_connect_apps(.)}) %>%
+        keep(~!is.null(.))
+    })
+    
+    all_depth <- c(new_depth, new_followers)
+    all_apps <- c(targets, origin_apps)
+    
+    final <- split_edge_node(all_depth, all_apps)
+    }
+    if(graph == T){
+      final_graph <- tbl_graph(nodes = rename(final$app_nodes, name = links, app_name = name), edges = final$app_edges, directed = FALSE)
+      
+      return(final_graph)
+    } else{
+      return(final)
+    }
+}
+
+melivre <- "https://play.google.com/store/apps/details?id=com.mercadolibre&gl=US"
+
+teste_depth <- crawl_app(melivre, depth = 2, graph = T)
+
+
+
+
+```
+
+Isso permite construir grafos como esse das relações entre os aplicativos
+
+```{r}
+
+teste_depth %N>%
+  mutate(degree = centrality_degree(),
+         big_label = ifelse(degree < 8, "", app_name)) %>%
+  ggraph(layout = 'kk') +
+  geom_edge_link() +
+  geom_node_point(aes(size = degree, color = degree)) +
+  geom_node_text(aes(label = big_label), size = 2)
+
+```
+
+Podemos fazer esse mesmo procedimento com múltiplas bases e unificar os grafos, permitindo que observemos o "ambiente" de recomendações para determinados aplicativos.
+

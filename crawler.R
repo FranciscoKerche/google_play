@@ -1,5 +1,5 @@
 # Google play crawler --------------------------------------------------------
-pacman::p_load(tidyverse, httr, lubridate, xml2, rvest, webdriver, tidygraph)
+pacman::p_load(tidyverse, httr, lubridate, xml2, rvest, webdriver, tidygraph, ggraph)
 
 
 get_app_info <- function(url){
@@ -117,39 +117,57 @@ connect_apps <- function(url, graph = F){
 followers <- connect_apps("https://play.google.com/store/apps/details?id=com.roblox.client&gl=US")
 follow_graph <- connect_apps("https://play.google.com/store/apps/details?id=com.roblox.client&gl=US", T)
 
+u <- "https://play.google.com/store/apps/details?id=com.roblox.client&gl=US"
 
-
-
-crawl_apps <- function(url, depth = 1, graph = F){
-    followers <- connect_apps(url)
+connect_apps(clean_scrape[1])
+crawl_app <- function(url, depth = 1, graph = F){
+  
+  try_connect_apps <- possibly(connect_apps, otherwise = NULL)
+  
+    followers <- try_connect_app(url)
+    if(is.null(followers)){
+      usethis::ui_stop("This app can't bee the seed")}
     to_scrape <- followers$app_edges$to %>%
       unique()
     scraped <- followers$app_edges$from %>%
       unique()
     clean_scrape <- to_scrape[!to_scrape %in% scraped]
     
-    new_depth <- map(clean_scrape, connect_apps)
+    usethis::ui_info("Start scrapping at depth 1")
+    
+    progressr::with_progress({
+    p <- progressr::progressor(length(clean_scrape)) # O parâmetro é a quantidade de passos
+      
+    new_depth <- map(clean_scrape, 
+                     ~{p()
+                       try_connect_apps(.)}) %>%
+      keep(~!is.null(.))
+    })
+    
+    split_edge_node <- function(.x, limit){
+      final_edge <- .x %>%
+        map(~.$app_edges) %>%
+        map_df(filter, to %in% limit) %>%
+        bind_rows(followers$app_edges) %>%
+        unique()
+      final_node <- .x %>%
+        map(~.$app_nodes) %>%
+        map_df(filter, links %in% limit) %>%
+        bind_rows(followers$app_nodes) %>%
+        unique()
+      final <- list(app_nodes = final_node,
+                    app_edges = final_edge)
+      return(final)
+    }
     
     if(depth == 1){
     
     all_apps <- c(to_scrape, scraped)
     
-    depth_1_edge <- new_depth %>%
-      map(~.$app_edges) %>%
-      map_df(filter, to %in% all_apps) %>%
-      bind_rows(followers$app_edges) %>%
-      unique()
-    depth_1_node <- new_depth %>%
-      map(~.$app_nodes) %>%
-      map_df(filter, links %in% all_apps) %>%
-      bind_rows(followers$app_nodes) %>%
-      unique()
+    final <- split_edge_node(new_depth, all_apps)
     
-    depth_1_final <- list(app_nodes = depth_1_node,
-                          app_edges = depth_1_edge)
-    return(depth_1_final)
-    }
     
+    } else if(depth == 2){
     
     
     targets <- new_depth %>%
@@ -164,20 +182,46 @@ crawl_apps <- function(url, depth = 1, graph = F){
       c(., scraped)
     
     new_clean_scrape <- targets[!targets %in% origin_apps]
-    
-    new_followers <- map(new_clean_scrape, connect_apps)
 
+    usethis::ui_info("Start scrapping at depth 2")
+    progressr::with_progress({
+    p <- progressr::progressor(length(new_clean_scrape)) # O parâmetro é a quantidade de passos
+      
+    new_followers <- map(new_clean_scrape, ~{
+      p()
+      try_connect_apps(.) %>%
+        keep(~!is.null(.))
+      })
+    })
+    
+    all_depth <- c(new_depth, new_followers)
+    all_apps <- c(targets, origin_apps)
+    
+    final <- split_edge_node(all_depth, all_apps)
+    }
+    if(graph == T){
+      final_graph <- tbl_graph(nodes = rename(final$app_nodes, name = links, app_name = name), edges = final$app_edges, directed = FALSE)
+      
+      return(final_graph)
+    } else{
+      return(final)
+    }
 }
 
+ifood <- "https://play.google.com/store/apps/details?id=br.com.brainweb.ifood"
+melivre <- "https://play.google.com/store/apps/details?id=com.mercadolibre&gl=US"
+
+teste_depth <- crawl_app(melivre, depth = 2, graph = T)
+teste_2 <- crawl_app(clean_scrape[1], depth = 2)
 
 
-
-
-
-
-
-
-
+teste_depth %N>%
+  mutate(degree = centrality_degree(),
+         big_label = ifelse(degree < 5, "", app_name)) %>%
+  ggraph(layout = 'kk') +
+  geom_edge_link() +
+  geom_node_point(aes(size = degree, color = degree)) +
+  geom_node_text(aes(label = big_label))
 
 
 
