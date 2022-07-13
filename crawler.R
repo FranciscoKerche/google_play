@@ -41,9 +41,9 @@ get_app_info <- function(url){
     xml2::xml_find_first("//div[@class = 'Vbfug auoIOc']") %>%
     xml_text()
   
-  app_producer <- tibble(link = prod_link,
+  app_producer <- tibble(prod_link = prod_link,
                          producer = prod_name) %>%
-    mutate(link = str_c('https://play.google.com', link))
+    mutate(prod_link = str_c('https://play.google.com', prod_link))
   
   
   
@@ -62,7 +62,7 @@ get_app_info <- function(url){
 
 get_app_relations <- function(url){
   
-  app_h <- httr::GET(url)
+  app_h <- httr::GET({{url}})
   
   # Get description
   app_info <- app_h %>%
@@ -71,80 +71,83 @@ get_app_relations <- function(url){
   related_apps <- app_info %>%
     xml2::xml_find_all("//div[@class = 'ubGTjb']") %>%
     xml_text() %>%
-    .[1:18]
+    .[!str_detect(., "([0-9\\.]+star|R\\$[0-9]+\\.[0-9]{2})")]
   
   related_apps_link <- app_info %>%
     xml2::xml_find_all("//a[@class = 'Si6A0c nT2RTe']") %>%
-    html_attr('href') %>%
-    .[1:6]
+    html_attr('href')
   
-  get_trios <- function(.x){
-    related_apps[seq(.x, length(related_apps), 3)]
+  get_pairs <- function(.x){
+    related_apps %>%
+      .[1:(length(related_apps_link)*2)] %>%
+      .[seq(.x, length(.), by = 2)]
   }
-  relations <- tibble(name = get_trios(1),
-                      producer = get_trios(2),
-                      evaluation = get_trios(3),
+  relations <- tibble(name = get_pairs(1),
+                      producer = get_pairs(2),
                       links = related_apps_link) %>%
-    mutate(evaluation = str_extract(evaluation, "[0-9.]+") %>%
-             as.numeric(),
-           links = str_c("https://play.google.com", links))
+    mutate(links = str_c("https://play.google.com", links))
   
   return(relations)
 }
 
-
 connect_apps <- function(url, graph = F){
-  original_info <- get_app_info(url)
-  relate <- get_app_relations(url)
+  original_info <- get_app_info({{url}})
+  relate <- get_app_relations({{url}}) %>%
+    select(links)
   relation_info <- map_df(relate$links, get_app_info)
   final_nodes <- relate %>%
     left_join(relation_info) %>%
-    bind_rows(original_info) %>%
-    select(name:links)
+    bind_rows(original_info)
   
   final_edges <- relate %>%
     select(to = links) %>%
     mutate(from = original_info$links)
   if(graph == F){
-  return(list("app_nodes" = final_nodes,
-              "app_edges" = final_edges))
+    output <-list("app_nodes" = final_nodes,
+                  "app_edges" = final_edges) 
+  return(output)
   } else{
   final_graph <- tidygraph::as_tbl_graph(final_edges) %N>%
     left_join(final_nodes)
   return(final_graph)
   }
 }
+connect_apps(ifood)
+
 followers <- connect_apps("https://play.google.com/store/apps/details?id=com.roblox.client&gl=US")
 follow_graph <- connect_apps("https://play.google.com/store/apps/details?id=com.roblox.client&gl=US", T)
+connect_apps(melivre)
+
+
+
+
 
 u <- "https://play.google.com/store/apps/details?id=com.roblox.client&gl=US"
 
-connect_apps(clean_scrape[1])
 crawl_app <- function(url, depth = 1, graph = F){
   
-  try_connect_apps <- possibly(connect_apps, otherwise = NULL)
+  try_connect_app <- possibly(connect_apps, otherwise = NULL)
+  followers <- try_connect_app({{url}})
+  if(is.null(followers)){
+    usethis::ui_stop("This app can't bee the seed")}
+  to_scrape <- followers$app_edges$to %>%
+    unique()
+  scraped <- followers$app_edges$from %>%
+    unique()
+  clean_scrape <- to_scrape[!to_scrape %in% scraped]
   
-    followers <- try_connect_app(url)
-    if(is.null(followers)){
-      usethis::ui_stop("This app can't bee the seed")}
-    to_scrape <- followers$app_edges$to %>%
-      unique()
-    scraped <- followers$app_edges$from %>%
-      unique()
-    clean_scrape <- to_scrape[!to_scrape %in% scraped]
-    
-    usethis::ui_info("Start scrapping at depth 1")
-    
-    progressr::with_progress({
+  usethis::ui_info("Start scrapping at depth 1")
+  
+  progressr::with_progress({
     p <- progressr::progressor(length(clean_scrape)) # O parâmetro é a quantidade de passos
       
     new_depth <- map(clean_scrape, 
                      ~{p()
-                       try_connect_apps(.)}) %>%
+                       try_connect_app(.)}) %>%
       keep(~!is.null(.))
     })
-    
-    split_edge_node <- function(.x, limit){
+  
+  split_edge_node <- function(.x, limit){
       final_edge <- .x %>%
         map(~.$app_edges) %>%
         map_df(filter, to %in% limit) %>%
@@ -189,9 +192,9 @@ crawl_app <- function(url, depth = 1, graph = F){
       
     new_followers <- map(new_clean_scrape, ~{
       p()
-      try_connect_apps(.) %>%
-        keep(~!is.null(.))
-      })
+      try_connect_app(.)
+      }) %>%
+      keep(~!is.null(.))
     })
     
     all_depth <- c(new_depth, new_followers)
@@ -213,14 +216,15 @@ melivre <- "https://play.google.com/store/apps/details?id=com.mercadolibre&gl=US
 
 teste_depth <- crawl_app(melivre, depth = 2, graph = T)
 teste_2 <- crawl_app(clean_scrape[1], depth = 2)
+teste_3 <- crawl_app(ifood, depth = 2, graph = T)
 
-
-teste_depth %N>%
+teste_3 %N>%
   mutate(degree = centrality_degree(),
          big_label = ifelse(degree < 5, "", app_name)) %>%
+  filter(degree > 1) %>%
   ggraph(layout = 'kk') +
   geom_edge_link() +
-  geom_node_point(aes(size = degree, color = degree)) +
+  geom_node_point(aes(size = degree, color = producer)) +
   geom_node_text(aes(label = big_label))
 
 
